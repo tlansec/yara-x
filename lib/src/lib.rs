@@ -89,6 +89,15 @@ mod tests;
 /// Current version number as a string (example: "1.9.0").
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub mod check_config {
+    //! Configuration types and logic for the `check` linting system.
+    //!
+    //! This module provides [`CheckConfig`] and [`apply_check_config`] for
+    //! translating a check configuration into linter instances on a
+    //! [`crate::Compiler`].
+    pub use crate::compiler::check_config::*;
+}
+
 pub mod linters {
     //! Linters that can be added to the compiler for performing additional checks.
     //!

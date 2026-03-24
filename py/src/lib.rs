@@ -36,11 +36,14 @@ use pyo3::types::{
     PyTuple, PyTzInfo,
 };
 use pyo3::{IntoPyObjectExt, create_exception};
+use serde::Deserialize;
 use strum_macros::{Display, EnumString};
 
 use ::yara_x as yrx;
+use yrx::check_config::{
+    CheckConfig, MetaValueType, MetadataConfig, apply_check_config,
+};
 use yara_x_fmt::Indentation;
-use yara_x_parser::ast::MetaValue;
 
 fn dict_to_json(dict: Bound<PyAny>) -> PyResult<serde_json::Value> {
     static JSON_DUMPS: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
@@ -71,21 +74,6 @@ enum SupportedModules {
     Crx,
     #[cfg(feature = "dex-module")]
     Dex,
-}
-
-// These are copies from the checker in the CLI, but exposing them in the API
-// for use here seems wrong. Maybe move them to a better place or just keep our
-// own copies here?
-fn is_sha256(s: &str) -> bool {
-    s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())
-}
-
-fn is_sha1(s: &str) -> bool {
-    s.len() == 40 && s.chars().all(|c| c.is_ascii_hexdigit())
-}
-
-fn is_md5(s: &str) -> bool {
-    s.len() == 32 && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 #[pyclass(unsendable)]
@@ -124,14 +112,45 @@ impl CheckResult {
 #[pyclass(from_py_object)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MetaType {
+    /// Represents a String type
     STRING,
+    /// Represents an Integer type
     INTEGER,
+    /// Represents a Float type
     FLOAT,
+    /// Represents a Boolean type
     BOOL,
+    /// Represents a SHA256 (string) type
     SHA256,
+    /// Represents a SHA1 (string) type
     SHA1,
+    /// Represents a MD5 (string) type
     MD5,
+    /// Represents a generic hash (string) type
     HASH,
+}
+
+impl From<MetaType> for MetaValueType {
+    fn from(mt: MetaType) -> MetaValueType {
+        match mt {
+            MetaType::STRING => MetaValueType::String,
+            MetaType::INTEGER => MetaValueType::Integer,
+            MetaType::FLOAT => MetaValueType::Float,
+            MetaType::BOOL => MetaValueType::Bool,
+            MetaType::SHA256 => MetaValueType::Sha256,
+            MetaType::SHA1 => MetaValueType::Sha1,
+            MetaType::MD5 => MetaValueType::MD5,
+            MetaType::HASH => MetaValueType::Hash,
+        }
+    }
+}
+
+/// Wrapper for deserializing a full `.yara-x.toml` config file, extracting
+/// only the `[check]` section.
+#[derive(Deserialize)]
+struct PartialConfig {
+    #[serde(default)]
+    check: CheckConfig,
 }
 
 /// Formats YARA rules.
@@ -734,83 +753,39 @@ impl Compiler {
         error: bool,
         regexp: Option<String>,
     ) -> PyResult<()> {
-        let mut linter =
-            yrx::linters::metadata(identifier).required(required).error(error);
-        match value_type {
-            MetaType::STRING => {
-                let message = if let Some(regexp) = regexp.clone() {
-                    let _ = regex::bytes::Regex::new(regexp.as_str())
-                        .map_err(|err| PyValueError::new_err(err.to_string()));
-                    format!(
-                        "`{identifier}` must be a string that matches `/{regexp}/`"
-                    )
-                } else {
-                    format!("`{identifier}` must be a string")
-                };
-                linter = linter.validator(
-                    move |meta| match (&meta.value, &regexp) {
-                        (MetaValue::String((s, _)), Some(regexp)) => {
-                            regex::Regex::new(regexp.as_str())
-                                .unwrap()
-                                .is_match(s)
-                        }
-                        (MetaValue::Bytes((s, _)), Some(regexp)) => {
-                            regex::bytes::Regex::new(regexp.as_str())
-                                .unwrap()
-                                .is_match(s)
-                        }
-                        (MetaValue::String(_), None) => true,
-                        (MetaValue::Bytes(_), None) => true,
-                        _ => false,
-                    },
-                    message,
-                );
-            }
-            MetaType::INTEGER => {
-                linter = linter.validator(
-                    |meta| matches!(meta.value, MetaValue::Integer(_)),
-                    format!("`{identifier}` must be an integer"),
-                );
-            }
-            MetaType::FLOAT => {
-                linter = linter.validator(
-                    |meta| matches!(meta.value, MetaValue::Float(_)),
-                    format!("`{identifier}` must be a float"),
-                );
-            }
-            MetaType::BOOL => {
-                linter = linter.validator(
-                    |meta| matches!(meta.value, MetaValue::Bool(_)),
-                    format!("`{identifier}` must be a bool"),
-                );
-            }
-            MetaType::SHA256 => {
-                linter = linter.validator(
-                        |meta| matches!(meta.value, MetaValue::String((s,_)) if is_sha256(s)),
-                        format!("`{identifier}` must be a SHA-256"),
-                    );
-            }
-            MetaType::SHA1 => {
-                linter = linter.validator(
-                        |meta| matches!(meta.value, MetaValue::String((s,_)) if is_sha1(s)),
-                        format!("`{identifier}` must be a SHA-1"),
-                    );
-            }
-            MetaType::MD5 => {
-                linter = linter.validator(
-                        |meta| matches!(meta.value, MetaValue::String((s,_)) if is_md5(s)),
-                        format!("`{identifier}` must be a MD5"),
-                    );
-            }
-            MetaType::HASH => {
-                linter = linter.validator(
-                        |meta| matches!(meta.value, MetaValue::String((s,_)) if is_md5(s) || is_sha1(s) || is_sha256(s)),
-                        format!("`{identifier}` must be a MD5, SHA-1 or SHA-256"),
-                    );
-            }
-        }
-        self.inner.add_linter(linter);
-        Ok(())
+        let mut meta_map = std::collections::BTreeMap::new();
+        meta_map.insert(
+            identifier.to_string(),
+            MetadataConfig {
+                ty: value_type.into(),
+                regexp,
+                required,
+                error,
+            },
+        );
+        let config = CheckConfig {
+            metadata: meta_map,
+            ..Default::default()
+        };
+        apply_check_config(&mut self.inner, &config)
+            .map_err(|err| PyValueError::new_err(err.to_string()))
+    }
+
+    /// Loads a TOML configuration file and applies the `[check]` section
+    /// to this compiler, adding the configured linters.
+    ///
+    /// The file format is the same as the `.yara-x.toml` used by `yr check`.
+    /// Sections other than `[check]` are ignored.
+    fn load_check_config<'py>(
+        &'py mut self,
+        path: &str,
+    ) -> PyResult<()> {
+        let contents = std::fs::read_to_string(path)
+            .map_err(|err| PyIOError::new_err(err.to_string()))?;
+        let config: PartialConfig = toml::from_str(&contents)
+            .map_err(|err| PyValueError::new_err(err.to_string()))?;
+        apply_check_config(&mut self.inner, &config.check)
+            .map_err(|err| PyValueError::new_err(err.to_string()))
     }
 
     /// Checks the provided source code for any errors or warnings.

@@ -79,6 +79,7 @@ mod rules;
 mod tests;
 
 pub mod base64;
+pub mod check_config;
 pub mod errors;
 pub mod linters;
 pub mod warnings;

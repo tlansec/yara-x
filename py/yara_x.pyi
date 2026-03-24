@@ -191,6 +191,14 @@ class Compiler:
         r"""Define expected type and value for metadata on rules."""
         ...
 
+    def load_check_config(self, path: str) -> None:
+        r"""Load a TOML configuration file and apply its [check] section.
+
+        The file format is the same as the `.yara-x.toml` used by `yr check`.
+        Sections other than `[check]` are ignored.
+        """
+        ...
+
     def check(src: str) -> List[CheckResult]:
         r"""Run the configured linters on the provided source code."""
         ...

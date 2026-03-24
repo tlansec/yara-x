@@ -8,10 +8,10 @@ use crossterm::tty::IsTty;
 use superconsole::{Component, Line, Lines, Span};
 use yansi::Color::{Green, Red, Yellow};
 use yansi::Paint;
-use yara_x::{SourceCode, linters};
-use yara_x_parser::ast::MetaValue;
+use yara_x::SourceCode;
+use yara_x::check_config::apply_check_config;
 
-use crate::config::{Config, MetaValueType};
+use crate::config::Config;
 use crate::walk::Message;
 use crate::{help, walk};
 
@@ -49,18 +49,6 @@ pub fn check() -> Command {
                 .required(false)
                 .value_parser(value_parser!(u8).range(1..)),
         )
-}
-
-fn is_sha256(s: &str) -> bool {
-    s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())
-}
-
-fn is_sha1(s: &str) -> bool {
-    s.len() == 40 && s.chars().all(|c| c.is_ascii_hexdigit())
-}
-
-fn is_md5(s: &str) -> bool {
-    s.len() == 32 && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 pub fn exec_check(args: &ArgMatches, config: &Config) -> anyhow::Result<()> {
@@ -104,111 +92,7 @@ pub fn exec_check(args: &ArgMatches, config: &Config) -> anyhow::Result<()> {
             let mut lines = Vec::new();
             let mut compiler = yara_x::Compiler::new();
 
-            for (identifier, config) in config.check.metadata.iter() {
-                let mut linter =
-                    linters::metadata(identifier)
-                        .required(config.required)
-                        .error(config.error);
-
-                match config.ty {
-                    MetaValueType::String => {
-                        let message = if let Some(regexp) = &config.regexp {
-                            // Make sure that the regexp is valid.
-                            let _ = regex::bytes::Regex::new(regexp)?;
-                            format!("`{identifier}` must be a string that matches `/{regexp}/`")
-                        } else {
-                            format!("`{identifier}` must be a string")
-                        };
-                        linter = linter.validator(
-                            |meta| {
-                                match (&meta.value, &config.regexp) {
-                                    (MetaValue::String((s, _)), Some(regexp)) => {
-                                        regex::Regex::new(regexp).unwrap().is_match(s)
-                                    }
-                                    (MetaValue::Bytes((s, _)), Some(regexp)) => {
-                                        regex::bytes::Regex::new(regexp).unwrap().is_match(s)
-                                    }
-                                    (MetaValue::String(_), None) => true,
-                                    (MetaValue::Bytes(_), None) => true,
-                                    _ => false,
-                                }
-                            },
-                            message,
-                        );
-                    }
-                    MetaValueType::Integer => {
-                        linter = linter.validator(
-                            |meta| matches!(meta.value, MetaValue::Integer(_)),
-                            format!("`{identifier}` must be an integer"),
-                        );
-                    }
-                    MetaValueType::Float => {
-                        linter = linter.validator(
-                            |meta| matches!(meta.value, MetaValue::Float(_)),
-                            format!("`{identifier}` must be a float"),
-                        );
-                    }
-                    MetaValueType::Bool => {
-                        linter = linter.validator(
-                            |meta| matches!(meta.value, MetaValue::Bool(_)),
-                            format!("`{identifier}` must be a bool"),
-                        );
-                    }
-                    MetaValueType::Sha256 => {
-                        linter = linter.validator(
-                            |meta| matches!(meta.value, MetaValue::String((s,_)) if is_sha256(s)),
-                            format!("`{identifier}` must be a SHA-256"),
-                        );
-                    }
-                    MetaValueType::Sha1 => {
-                        linter = linter.validator(
-                            |meta| matches!(meta.value, MetaValue::String((s,_)) if is_sha1(s)),
-                            format!("`{identifier}` must be a SHA-1"),
-                        );
-                    }
-                    MetaValueType::MD5 => {
-                        linter = linter.validator(
-                            |meta| matches!(meta.value, MetaValue::String((s,_)) if is_md5(s)),
-                            format!("`{identifier}` must be a MD5"),
-                        );
-                    }
-                    MetaValueType::Hash => {
-                        linter = linter.validator(
-                            |meta| matches!(meta.value, MetaValue::String((s,_))
-                                if is_md5(s) || is_sha1(s) || is_sha256(s)),
-                            format!("`{identifier}` must be a MD5, SHA-1 or SHA-256"),
-                        );
-                    }
-                }
-
-                compiler.add_linter(linter);
-            }
-
-            if let Some(re) = config
-                .check
-                .rule_name
-                .regexp
-                .as_ref()
-                .filter(|re| !re.is_empty()) {
-                compiler.add_linter(
-                    linters::rule_name(re)?.error(config.check.rule_name.error));
-            }
-
-            // Prefer allowed list over the regex, as it is more explicit.
-            if !config.check.tags.allowed.is_empty() {
-                compiler.add_linter(
-                    linters::tags_allowed(config.check.tags.allowed.clone())
-                        .error(config.check.tags.error));
-            } else if let Some(re) = config
-                .check
-                .tags
-                .regexp
-                .as_ref()
-                .filter(|re| !re.is_empty()) {
-                compiler.add_linter(
-                    linters::tag_regex(re)?.error(config.check.tags.error)
-                );
-            }
+            apply_check_config(&mut compiler, &config.check)?;
 
             compiler.colorize_errors(io::stdout().is_tty());
 
